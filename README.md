@@ -1,4 +1,4 @@
-# Yolov5 Real-time Inference using Streamlit
+# Yolov8 Real-time Inference using Streamlit
 A web interface for real-time yolo inference using streamlit. It supports CPU and GPU inference, supports both images and videos and uploading your own custom models.
 
 <img src="output.gif" alt="demo of the dashboard" width="800"/>
@@ -37,5 +37,3 @@ streamlit run app.py
 
 ## References
 https://discuss.streamlit.io/t/deploy-yolov5-object-detection-on-streamlit/27675
-# yolo_with_streamlit
-# yolo_with_streamlit
