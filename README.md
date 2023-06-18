@@ -23,7 +23,7 @@ After cloning the repo:
 3. Add sample video to `data/sample_videos` and call it `sample.mp4` or change name in the code.
 4. Add the model file to `models/` and change `cfg_model_path` to its path.
 ```bash
-https://github.com/Wolfman1219/yolo_with_streamlit.git
+git clone https://github.com/Wolfman1219/yolo_with_streamlit.git
 cd yolo_with_streamlit
 streamlit run app.py
 ```
