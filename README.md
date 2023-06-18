@@ -3,8 +3,6 @@ A web interface for real-time yolo inference using streamlit. It supports CPU an
 
 <img src="output.gif" alt="demo of the dashboard" width="800"/>
 
-### [Live Demo](https://moaaztaha-yolo-interface-using-streamlit-app-ioset2.streamlit.app/)
-
 
 ## Features
 - **Caches** the model for faster inference on both CPU and GPU.
@@ -26,7 +24,7 @@ After cloning the repo:
 4. Add the model file to `models/` and change `cfg_model_path` to its path.
 ```bash
 git clone https://github.com/moaaztaha/Yolo-Interface-using-Streamlit
-cd Yolo-Interface-using-Streamlit
+cd yolo_with_streamlit
 streamlit run app.py
 ```
 
