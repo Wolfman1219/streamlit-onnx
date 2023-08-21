@@ -100,7 +100,7 @@ def main():
             output = run_tensorrt(image=frame, enggine_path='models/yolov8n.engine')
 
             # Convert the output to an image that can be displayed
-            output_image = Image.fromarray(output)
+            output_image = Image.fromarray(cv2.cvtColor(output, cv2.COLOR_BGR2RGB))
 
             # Display the image
             outputing.image(output_image)
@@ -110,4 +110,8 @@ def main():
         st.write("Please upload a video file or choose to use the default video.")
 
 if __name__ == "__main__":
-    main()
+    while True:
+        try:
+            main()
+        except:
+            continue
