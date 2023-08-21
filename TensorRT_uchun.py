@@ -4,28 +4,21 @@ import warnings
 from collections import namedtuple
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
-
+import pycuda.autoinit
 import numpy as np
-import pycuda.autoinit  # noqa F401
 import pycuda.driver as cuda
+context = cuda.Device(0).make_context()
 import tensorrt as trt
 from numpy import ndarray
+# import atexit
 
-os.environ['CUDA_MODULE_LOADING'] = 'LAZY'
-warnings.filterwarnings(action='ignore', category=DeprecationWarning)
 class TRTEngine:
-
     def __init__(self, weight: Union[str, Path]) -> None:
         self.weight = Path(weight) if isinstance(weight, str) else weight
-        self.context = cuda.Device(1).make_context()
-        self.stream = cuda.Stream()
+        self.stream = cuda.Stream(0)
         self.__init_engine()
         self.__init_bindings()
         self.__warm_up()
-        # self.stream = cuda.Stream(0)
-        # self.__init_engine()
-        # self.__init_bindings()
-        # self.__warm_up()
 
     def __init_engine(self) -> None:
         logger = trt.Logger(trt.Logger.WARNING)
@@ -141,7 +134,6 @@ class TRTEngine:
             outputs.append(cpu)
             output_gpu_ptrs.append(gpu)
             self.bindings[j] = int(gpu)
-
         self.context.execute_async_v2(self.bindings, self.stream.handle)
         self.stream.synchronize()
 
@@ -180,13 +172,8 @@ def letterbox(im: ndarray,
         im = cv2.resize(im, new_unpad, interpolation=cv2.INTER_LINEAR)
     top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
     left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
-    im = cv2.copyMakeBorder(im,
-                            top,
-                            bottom,
-                            left,
-                            right,
-                            cv2.BORDER_CONSTANT,
-                            value=color)  # add border
+    im = cv2.copyMakeBorder(im,top,bottom,left,right,cv2.BORDER_CONSTANT,value=color)  # add border
+    
     return im, r, (dw, dh)
 def letterbox(im: ndarray,
               new_shape: Union[Tuple, List] = (640, 640),
@@ -212,13 +199,7 @@ def letterbox(im: ndarray,
         im = cv2.resize(im, new_unpad, interpolation=cv2.INTER_LINEAR)
     top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
     left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
-    im = cv2.copyMakeBorder(im,
-                            top,
-                            bottom,
-                            left,
-                            right,
-                            cv2.BORDER_CONSTANT,
-                            value=color)  # add border
+    im = cv2.copyMakeBorder(im,top,bottom,left,right,cv2.BORDER_CONSTANT,value=color)  # add border
     return im, r, (dw, dh)
 
 def blob(im: ndarray, return_seg: bool = False) -> Union[ndarray, Tuple]:
@@ -232,13 +213,10 @@ def blob(im: ndarray, return_seg: bool = False) -> Union[ndarray, Tuple]:
     else:
         return im
 
-
 def run_tensorrt(enggine_path, image):
     enggine = TRTEngine(enggine_path)
 
     H, W = enggine.inp_info[0].shape[-2:]
-
-    # image = cv2.imread(image_path)
     bgr, ratio, dwdh = letterbox(image, (W, H))
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
     tensor = blob(rgb, return_seg=False)
@@ -251,22 +229,23 @@ def run_tensorrt(enggine_path, image):
     bboxes -= dwdh
     bboxes /= ratio
 
-    CLASSES = ('car')
+    # CLASSES = ('person','car','car', 'car', 'car','car', 'car','car','car', 'car','car','car','car','car')
+    CLASSES = {0: 'person',1: 'bicycle',2: 'car',3: 'motorcycle',4: 'airplane',5: 'bus',6: 'train',7: 'truck',8: 'boat',9: 'traffic light',10: 'fire hydrant',11: 'stop sign',12: 'parking meter',13: 'bench',14: 'bird',15: 'cat',16: 'dog',17: 'horse',18: 'sheep',19: 'cow',
+            20: 'elephant',21: 'bear',22: 'zebra',23: 'giraffe',24: 'backpack',25: 'umbrella',26: 'handbag',27: 'tie',28: 'suitcase',29: 'frisbee',30: 'skis',31: 'snowboard',32: 'sports ball',33: 'kite',34: 'baseball bat',35: 'baseball glove',36: 'skateboard',37: 'surfboard',38: 'tennis racket',39: 'bottle',
+            40: 'wine glass',41: 'cup',42: 'fork',43: 'knife',44: 'spoon',45: 'bowl',46: 'banana',47: 'apple',48: 'sandwich',49: 'orange',50: 'broccoli',51: 'carrot',52: 'hot dog',53: 'pizza',54: 'donut',55: 'cake',56: 'chair',57: 'couch',58: 'potted plant',59: 'bed',
+            60: 'dining table',61: 'toilet',62: 'tv',63: 'laptop',64: 'mouse',65: 'remote',66: 'keyboard',67: 'cell phone',68: 'microwave',69: 'oven',70: 'toaster',71: 'sink',72: 'refrigerator',73: 'book',74: 'clock',75: 'vase',76: 'scissors',77: 'teddy bear',78: 'hair drier',  79: 'toothbrush'}
 
     for (bbox, score, label) in zip(bboxes, scores, labels):
         bbox = bbox.round().astype(np.int32).tolist()
         cls_id = int(label)
-        # cls = CLASSES[cls_id]
+        cls = CLASSES[cls_id]
         color = (0,255,0)
         cv2.rectangle(image, tuple(bbox[:2]), tuple(bbox[2:]), color, 2)
         cv2.putText(image,
-                f'Car:{score:.3f}', (bbox[0], bbox[1] - 2),
+                f'{cls}:{score:.3f}', (bbox[0], bbox[1] - 2),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.75, [225, 255, 255],
                 thickness=2)
-    # cv2.imwrite("output.jpg", image)
+        # cv2.imwrite("output.jpg", image)
     return image
-
-# image = cv2.imread("data/sample_images/1.jpg")
-# image = run_tensorrt(enggine_path="models/best.engine", image = image)
-# cv2.imwrite("image_output.jpg", image)
+context.pop()

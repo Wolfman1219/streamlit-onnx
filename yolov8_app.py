@@ -1,198 +1,311 @@
+import os
+import cv2
+from collections import namedtuple
+from pathlib import Path
+from typing import List, Optional, Tuple, Union
+import pycuda.autoinit
+import numpy as np
+import pycuda.driver as cuda
+# context = cuda.Device(0).make_context()
+import tensorrt as trt
+from numpy import ndarray
 import glob
 import streamlit as st
 import wget
 from PIL import Image
-import torch
-import cv2
-import os
 import time
+import supervision as sv
+import tempfile
 
-st.set_page_config(layout="wide")
+class TRTEngine:
+    def __init__(self, weight: Union[str, Path]) -> None:
+        self.weight = Path(weight) if isinstance(weight, str) else weight
+        self.stream = cuda.Stream(0)
+        self.__init_engine()
+        self.__init_bindings()
+        self.__warm_up()
 
-cfg_model_path = 'models/yolov8s.pt'
-model = None
-confidence = .25
+    def __init_engine(self) -> None:
+        logger = trt.Logger(trt.Logger.WARNING)
+        trt.init_libnvinfer_plugins(logger, namespace='')
+        with trt.Runtime(logger) as runtime:
+            model = runtime.deserialize_cuda_engine(self.weight.read_bytes())
 
+        context = model.create_execution_context()
 
-def image_input(data_src):
-    img_file = None
-    if data_src == 'Sample data':
-        # get all sample images
-        img_path = glob.glob('data/sample_images/*')
-        img_slider = st.slider("Select a test image.", min_value=1, max_value=len(img_path), step=1)
-        img_file = img_path[img_slider - 1]
+        names = [model.get_binding_name(i) for i in range(model.num_bindings)]
+        self.num_bindings = model.num_bindings
+        self.bindings: List[int] = [0] * self.num_bindings
+        num_inputs, num_outputs = 0, 0
+
+        for i in range(model.num_bindings):
+            if model.binding_is_input(i):
+                num_inputs += 1
+            else:
+                num_outputs += 1
+
+        self.num_inputs = num_inputs
+        self.num_outputs = num_outputs
+        self.model = model
+        self.context = context
+        self.input_names = names[:num_inputs]
+        self.output_names = names[num_inputs:]
+
+    def __init_bindings(self) -> None:
+        dynamic = False
+        Tensor = namedtuple('Tensor', ('name', 'dtype', 'shape', 'cpu', 'gpu'))
+        inp_info = []
+        out_info = []
+        out_ptrs = []
+        for i, name in enumerate(self.input_names):
+            assert self.model.get_binding_name(i) == name
+            dtype = trt.nptype(self.model.get_binding_dtype(i))
+            shape = tuple(self.model.get_binding_shape(i))
+            if -1 in shape:
+                dynamic |= True
+            if not dynamic:
+                cpu = np.empty(shape, dtype)
+                gpu = cuda.mem_alloc(cpu.nbytes)
+                cuda.memcpy_htod_async(gpu, cpu, self.stream)
+            else:
+                cpu, gpu = np.empty(0), 0
+            inp_info.append(Tensor(name, dtype, shape, cpu, gpu))
+        for i, name in enumerate(self.output_names):
+            i += self.num_inputs
+            assert self.model.get_binding_name(i) == name
+            dtype = trt.nptype(self.model.get_binding_dtype(i))
+            shape = tuple(self.model.get_binding_shape(i))
+            if not dynamic:
+                cpu = np.empty(shape, dtype=dtype)
+                gpu = cuda.mem_alloc(cpu.nbytes)
+                cuda.memcpy_htod_async(gpu, cpu, self.stream)
+                out_ptrs.append(gpu)
+            else:
+                cpu, gpu = np.empty(0), 0
+            out_info.append(Tensor(name, dtype, shape, cpu, gpu))
+
+        self.is_dynamic = dynamic
+        self.inp_info = inp_info
+        self.out_info = out_info
+        self.out_ptrs = out_ptrs
+
+    def __warm_up(self) -> None:
+        if self.is_dynamic:
+            print('You engine has dynamic axes, please warm up by yourself !')
+            return
+        for _ in range(10):
+            inputs = []
+            for i in self.inp_info:
+                inputs.append(i.cpu)
+            self.__call__(inputs)
+
+    def set_profiler(self, profiler: Optional[trt.IProfiler]) -> None:
+        self.context.profiler = profiler \
+            if profiler is not None else trt.Profiler()
+
+    def __call__(self, *inputs) -> Tuple[ndarray, ndarray, ndarray, ndarray]:
+
+        assert len(inputs) == self.num_inputs
+        contiguous_inputs: List[ndarray] = [
+            np.ascontiguousarray(i) for i in inputs
+        ]
+
+        for i in range(self.num_inputs):
+
+            if self.is_dynamic:
+                self.context.set_binding_shape(
+                    i, tuple(contiguous_inputs[i].shape))
+                self.inp_info[i].gpu = cuda.mem_alloc(
+                    contiguous_inputs[i].nbytes)
+
+            cuda.memcpy_htod_async(self.inp_info[i].gpu, contiguous_inputs[i],
+                                   self.stream)
+            self.bindings[i] = int(self.inp_info[i].gpu)
+
+        output_gpu_ptrs: List[int] = []
+        outputs: List[ndarray] = []
+
+        for i in range(self.num_outputs):
+            j = i + self.num_inputs
+            if self.is_dynamic:
+                shape = tuple(self.context.get_binding_shape(j))
+                dtype = self.out_info[i].dtype
+                cpu = np.empty(shape, dtype=dtype)
+                gpu = cuda.mem_alloc(contiguous_inputs[i].nbytes)
+                cuda.memcpy_htod_async(gpu, cpu, self.stream)
+            else:
+                cpu = self.out_info[i].cpu
+                gpu = self.out_info[i].gpu
+            outputs.append(cpu)
+            output_gpu_ptrs.append(gpu)
+            self.bindings[j] = int(gpu)
+        self.context.execute_async_v2(self.bindings, self.stream.handle)
+        self.stream.synchronize()
+
+        for i, o in enumerate(output_gpu_ptrs):
+            cuda.memcpy_dtoh_async(outputs[i], o, self.stream)
+        
+        data_output = tuple(outputs) if len(outputs) > 1 else outputs[0]
+        num_dets, bboxes, scores, labels = (i[0] for i in data_output)
+        nums = num_dets.item()
+        bboxes = bboxes[:nums]
+        scores = scores[:nums]
+        labels = labels[:nums]
+        
+        return bboxes, scores, labels
+
+def letterbox(im: ndarray,
+              new_shape: Union[Tuple, List] = (640, 640),
+              color: Union[Tuple, List] = (0, 0, 0)) \
+        -> Tuple[ndarray, float, Tuple[float, float]]:
+    # Resize and pad image while meeting stride-multiple constraints
+    shape = im.shape[:2]  # current shape [height, width]
+    if isinstance(new_shape, int):
+        new_shape = (new_shape, new_shape)
+
+    # Scale ratio (new / old)
+    r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
+
+    # Compute padding
+    new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
+    dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[
+        1]  # wh padding
+
+    dw /= 2  # divide padding into 2 sides
+    dh /= 2
+
+    if shape[::-1] != new_unpad:  # resize
+        im = cv2.resize(im, new_unpad, interpolation=cv2.INTER_LINEAR)
+    top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+    left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+    im = cv2.copyMakeBorder(im,top,bottom,left,right,cv2.BORDER_CONSTANT,value=color)  # add border
+    
+    return im, r, (dw, dh)
+def letterbox(im: ndarray,
+              new_shape: Union[Tuple, List] = (640, 640),
+              color: Union[Tuple, List] = (0, 0, 0)) \
+        -> Tuple[ndarray, float, Tuple[float, float]]:
+    # Resize and pad image while meeting stride-multiple constraints
+    shape = im.shape[:2]  # current shape [height, width]
+    if isinstance(new_shape, int):
+        new_shape = (new_shape, new_shape)
+
+    # Scale ratio (new / old)
+    r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
+
+    # Compute padding
+    new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
+    dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[
+        1]  # wh padding
+
+    dw /= 2  # divide padding into 2 sides
+    dh /= 2
+
+    if shape[::-1] != new_unpad:  # resize
+        im = cv2.resize(im, new_unpad, interpolation=cv2.INTER_LINEAR)
+    top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+    left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+    im = cv2.copyMakeBorder(im,top,bottom,left,right,cv2.BORDER_CONSTANT,value=color)  # add border
+    return im, r, (dw, dh)
+
+def blob(im: ndarray, return_seg: bool = False) -> Union[ndarray, Tuple]:
+    if return_seg:
+        seg = im.astype(np.float32) / 255
+    im = im.transpose([2, 0, 1])
+    im = im[np.newaxis, ...]
+    im = np.ascontiguousarray(im).astype(np.float32) / 255
+    if return_seg:
+        return im, seg
     else:
-        img_bytes = st.sidebar.file_uploader("Upload an image", type=['png', 'jpeg', 'jpg'])
-        if img_bytes:
-            img_file = "data/uploaded_data/upload." + img_bytes.name.split('.')[-1]
-            Image.open(img_bytes).save(img_file)
+        return im
 
-    if img_file:
-        col1, col2 = st.columns(2)
-        with col1:
-            st.image(img_file, caption="Selected Image")
-        with col2:
-            img = infer_image(img_file)
-            st.image(img, caption="Model prediction")
+def run_tensorrt(enggine_path, image):
+    enggine = TRTEngine(enggine_path)
 
+    H, W = enggine.inp_info[0].shape[-2:]
+    bgr, ratio, dwdh = letterbox(image, (W, H))
+    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    tensor = blob(rgb, return_seg=False)
+    dwdh = np.array(dwdh * 2, dtype=np.float32)
+    tensor = np.ascontiguousarray(tensor)
 
-def video_input(data_src):
-    vid_file = None
-    if data_src == 'Sample data':
-        vid_file = "data/sample_videos/sample.mp4"
-    else:
-        vid_bytes = st.sidebar.file_uploader("Upload a video", type=['mp4', 'mpv', 'avi'])
-        if vid_bytes:
-            vid_file = "data/uploaded_data/upload." + vid_bytes.name.split('.')[-1]
-            with open(vid_file, 'wb') as out:
-                out.write(vid_bytes.read())
+    # Detection
+    results = enggine(tensor)
+    bboxes, scores, labels = results
+    bboxes -= dwdh
+    bboxes /= ratio
 
-    if vid_file:
-        cap = cv2.VideoCapture(vid_file)
-        custom_size = st.sidebar.checkbox("Custom frame size")
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        if custom_size:
-            width = st.sidebar.number_input("Width", min_value=120, step=20, value=width)
-            height = st.sidebar.number_input("Height", min_value=120, step=20, value=height)
+    CLASSES = {0: 'person',1: 'bicycle',2: 'car',3: 'motorcycle',4: 'airplane',5: 'bus',6: 'train',7: 'truck',8: 'boat',9: 'traffic light',10: 'fire hydrant',11: 'stop sign',12: 'parking meter',13: 'bench',14: 'bird',15: 'cat',16: 'dog',17: 'horse',18: 'sheep',19: 'cow',
+            20: 'elephant',21: 'bear',22: 'zebra',23: 'giraffe',24: 'backpack',25: 'umbrella',26: 'handbag',27: 'tie',28: 'suitcase',29: 'frisbee',30: 'skis',31: 'snowboard',32: 'sports ball',33: 'kite',34: 'baseball bat',35: 'baseball glove',36: 'skateboard',37: 'surfboard',38: 'tennis racket',39: 'bottle',
+            40: 'wine glass',41: 'cup',42: 'fork',43: 'knife',44: 'spoon',45: 'bowl',46: 'banana',47: 'apple',48: 'sandwich',49: 'orange',50: 'broccoli',51: 'carrot',52: 'hot dog',53: 'pizza',54: 'donut',55: 'cake',56: 'chair',57: 'couch',58: 'potted plant',59: 'bed',
+            60: 'dining table',61: 'toilet',62: 'tv',63: 'laptop',64: 'mouse',65: 'remote',66: 'keyboard',67: 'cell phone',68: 'microwave',69: 'oven',70: 'toaster',71: 'sink',72: 'refrigerator',73: 'book',74: 'clock',75: 'vase',76: 'scissors',77: 'teddy bear',78: 'hair drier',  79: 'toothbrush'}
 
-        fps = 0
-        st1, st2, st3 = st.columns(3)
-        with st1:
-            st.markdown("## Height")
-            st1_text = st.markdown(f"{height}")
-        with st2:
-            st.markdown("## Width")
-            st2_text = st.markdown(f"{width}")
-        with st3:
-            st.markdown("## FPS")
-            st3_text = st.markdown(f"{fps}")
-
-        st.markdown("---")
-        output = st.empty()
-        prev_time = 0
-        curr_time = 0
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                st.write("Can't read frame, stream ended? Exiting ....")
-                break
-            frame = cv2.resize(frame, (width, height))
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            output_img = infer_image(frame)
-            output.image(output_img)
-            curr_time = time.time()
-            fps = 1 / (curr_time - prev_time)
-            prev_time = curr_time
-            st1_text.markdown(f"**{height}**")
-            st2_text.markdown(f"**{width}**")
-            st3_text.markdown(f"**{fps:.2f}**")
-
-        cap.release()
-
-
-def infer_image(img, size=None):
-    model.conf = confidence
-    result = model(img, size=size) if size else model(img)
-    result.render()
-    image = Image.fromarray(result.ims[0])
+    for (bbox, score, label) in zip(bboxes, scores, labels):
+        bbox = bbox.round().astype(np.int32).tolist()
+        cls_id = int(label)
+        cls = CLASSES[cls_id]
+        color = (0,255,0)
+        cv2.rectangle(image, tuple(bbox[:2]), tuple(bbox[2:]), color, 2)
+        cv2.putText(image,
+                f'{cls}:{score:.3f}', (bbox[0], bbox[1] - 2),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.75, [225, 255, 255],
+                thickness=2)
+        # cv2.imwrite("output.jpg", image)
     return image
 
 
-@st.experimental_singleton
-def load_model(path, device):
-    model_ = torch.hub.load('ultralytics/yolov5', 'custom', path=path, force_reload=True)
-    model_.to(device)
-    print("model to ", device)
-    return model_
 
 
-@st.experimental_singleton
-def download_model(url):
-    model_file = wget.download(url, out="models")
-    return model_file
-
-
-def get_user_model():
-    model_src = st.sidebar.radio("Model source", ["file upload", "url"])
-    model_file = None
-    if model_src == "file upload":
-        model_bytes = st.sidebar.file_uploader("Upload a model file", type=['pt'])
-        if model_bytes:
-            model_file = "models/uploaded_" + model_bytes.name
-            with open(model_file, 'wb') as out:
-                out.write(model_bytes.read())
-    else:
-        url = st.sidebar.text_input("model url")
-        if url:
-            model_file_ = download_model(url)
-            if model_file_.split(".")[-1] == "pt":
-                model_file = model_file_
-
-    return model_file
 
 def main():
-    # global variables
-    global model, confidence, cfg_model_path
+    DEFAULT_VIDEO_PATH = "/home/hasan/Public/yolo_with_streamlit/data/sample_videos/sample.mp4"
 
-    st.title("Object Recognition Dashboard")
+# Create a video file uploader
+    st.header("Upload a video for inference")
+    uploaded_file = st.file_uploader("Choose a video...", type=["mp4", "avi", "mov"])
 
-    st.sidebar.title("Settings")
+    # Create a radio button for selecting between default video and uploaded video
+    video_selection = st.radio(
+        "Select video for inference:",
+        ("Use default video", "Use uploaded video")
+    )
 
-    # upload model
-    model_src = st.sidebar.radio("Select yolov5 weight file", ["Use our demo model 5s", "Use your own model"])
-    # URL, upload file (max 200 mb)
-    if model_src == "Use your own model":
-        user_model_path = get_user_model()
-        if user_model_path:
-            cfg_model_path = user_model_path
+    # If the user chooses to use the default video
+    if video_selection == "Use default video":
+        video_path = DEFAULT_VIDEO_PATH
 
-        st.sidebar.text(cfg_model_path.split("/")[-1])
-        st.sidebar.markdown("---")
+    # If the user chooses to use the uploaded video
+    elif video_selection == "Use uploaded video" and uploaded_file is not None:
+        tfile = tempfile.NamedTemporaryFile(delete=False) 
+        tfile.write(uploaded_file.read())
+        video_path = tfile.name
 
-    # check if model file is available
-    if not os.path.isfile(cfg_model_path):
-        st.warning("Model file not available!!!, please added to the model folder.", icon="⚠️")
+    # If there's a video to process, do the inference
+    if video_path is not None:
+        # Load the video with cv2
+        cap = cv2.VideoCapture(video_path)
+        outputing = st.empty()
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            # Run the inference
+            output = run_tensorrt(image=frame, enggine_path='models/yolov8n.engine')
+
+            # Convert the output to an image that can be displayed
+            output_image = Image.fromarray(output)
+
+            # Display the image
+            outputing.image(output_image)
+
+        cap.release()
     else:
-        # device options
-        if torch.cuda.is_available():
-            device_option = st.sidebar.radio("Select Device", ['cpu', 'cuda'], disabled=False, index=0)
-        else:
-            device_option = st.sidebar.radio("Select Device", ['cpu', 'cuda'], disabled=True, index=0)
-
-        # load model
-        model = load_model(cfg_model_path, device_option)
-
-        # confidence slider
-        confidence = st.sidebar.slider('Confidence', min_value=0.1, max_value=1.0, value=.45)
-
-        # custom classes
-        if st.sidebar.checkbox("Custom Classes"):
-            model_names = list(model.names.values())
-            assigned_class = st.sidebar.multiselect("Select Classes", model_names, default=[model_names[0]])
-            classes = [model_names.index(name) for name in assigned_class]
-            model.classes = classes
-        else:
-            model.classes = list(model.names.keys())
-
-        st.sidebar.markdown("---")
-
-        # input options
-        input_option = st.sidebar.radio("Select input type: ", ['image', 'video'])
-
-        # input src option
-        data_src = st.sidebar.radio("Select input source: ", ['Sample data', 'Upload your own data'])
-
-        if input_option == 'image':
-            image_input(data_src)
-        else:
-            video_input(data_src)
-
+        st.write("Please upload a video file or choose to use the default video.")
 
 if __name__ == "__main__":
-    try:
-        main()
-    except SystemExit:
-        pass
+    main()
+    print("main\n\n\n")
 
-
+ 

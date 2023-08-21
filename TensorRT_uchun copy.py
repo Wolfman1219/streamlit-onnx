@@ -279,7 +279,7 @@ while True:
     frame = cv2.resize(frame, (width, height))
     output_img = run_tensorrt(enggine_path = "models/yolov8n.engine", image = frame)
     curr_time = time.time()
-    fps = (1 / (curr_time - prev_time)) * 4.5
+    fps = 1 / (curr_time - prev_time)
     print("FPS: --", fps)
     fpss.append(fps)
     prev_time = curr_time

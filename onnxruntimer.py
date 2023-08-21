@@ -2,13 +2,6 @@ import onnxruntime
 import cv2
 import numpy as np
 from PIL import Image
-import supervision as sv
-
-box_annotator = sv.BoxAnnotator(
-        thickness=2,
-        text_thickness=2,
-        text_scale=1
-    )
 
 def prediction_onnx(model_path, image):
     opt_session = onnxruntime.SessionOptions()
@@ -105,9 +98,7 @@ def prediction_onnx(model_path, image):
     # Apply non-maxima suppression to suppress weak, overlapping bounding boxes
     indices = nms(boxes, scores, 0.0)
 
-    CLASSES = [
-    'car'
-    ]
+    CLASSES = ['car']
 
     def xywh2xyxy(x):
         # Convert bounding box (x, y, w, h) to bounding box (x1, y1, x2, y2)
@@ -123,13 +114,13 @@ def prediction_onnx(model_path, image):
         bbox = bbox.round().astype(np.int32).tolist()
         print(bbox)
         cls_id = int(label)
-        # cls = CLASSES[cls_id]
+        cls = CLASSES[0]
         color = (0,255,0)
         cv2.rectangle(image_draw, tuple(bbox[:2]), tuple(bbox[2:]), color, 2)
         cv2.putText(image_draw,
-                    f'Car:{int(score*150)}', (bbox[0], bbox[1] - 2),
+                    f'{cls}:{int(score*100)}', (bbox[0], bbox[1] - 2),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7, [225, 0, 255],
-                    thickness=2)
+                    0.60, [225, 255, 255],
+                    thickness=1)
     return image_draw
 
