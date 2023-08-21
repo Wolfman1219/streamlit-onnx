@@ -5,15 +5,8 @@ A web interface for real-time yolo inference using streamlit. It supports CPU an
 
 
 ## Features
-- **Caches** the model for faster inference on both CPU and GPU.
 - Supports uploading model files (<200MB) and downloading models from URL (any size)
-- Supports both images and videos.
-- Supports both CPU and GPU inference.
-- Supports:
-  - Custom Classes
-  - Changing Confidence
-  - Changing input/frame size for videos
-
+- Supports videos.
 
 ## How to run
 After cloning the repo:
