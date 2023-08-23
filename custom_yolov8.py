@@ -7,13 +7,22 @@ import os
 import time
 import numpy as np
 import supervision as sv
-# from onnxruntimer import prediction_onnx
-from foziljon_trt import run_tensorrt
-# from TensorRT_uchun import run_tensorrt
 import time
-from with_RT import run_tensorrt
- # very important
-import pycuda.autoinit
+import onnxruntime
+
+from onnxruntimer import prediction_onnx
+
+opt_session = onnxruntime.SessionOptions()
+opt_session.enable_mem_pattern = False
+opt_session.enable_cpu_mem_arena = False
+opt_session.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_DISABLE_ALL
+# model_path = 'models/best.onnx'
+EP_list = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+ort_session = onnxruntime.InferenceSession('/home/hasan/Public/yolo_with_streamlit/models/yolov8n.onnx', providers=EP_list)
+
+
+
+
 st.set_page_config(layout="wide")
 cfg_model_path = 'models/yolov8n.engine'
 model = None
@@ -44,7 +53,7 @@ def image_input(data_src):
             st.image(img_file, caption="Tanlangan rasm")
         with col2:
             open_cv_image = np.array(img_file) 
-            img = infer_image(model_path=cfg_model_path, img=open_cv_image, TensorRT=True)
+            img = infer_image(model = ort_session, img=open_cv_image)
             img = img[0]
             img = Image.fromarray(img.plot()[:,:,::-1])
             st.image(img, caption="Model bashorati")
@@ -88,7 +97,7 @@ def video_input(data_src):
                 break
             frame = cv2.resize(frame, (width, height))
             
-            output_img = infer_image(model_path=cfg_model_path, img=frame, TensorRT=True)
+            output_img = infer_image(model = ort_session, img=frame)
             output.image(output_img)
             curr_time = time.time()
             fps = 1 / (curr_time - prev_time)
@@ -101,33 +110,9 @@ def video_input(data_src):
         cap.release()
 
 
-def infer_image(img, model_path = cfg_model_path, size=None, onnx = False, TensorRT = False):
-    return run_tensorrt(enggine_path= model_path, image=img)
-    
+def infer_image(img, model = ort_session):
+    return prediction_onnx(ort_session=ort_session, image=img)
 
-@st.cache_resource
-def download_model(url):
-    model_file = wget.download(url, out="models")
-    return model_file
-
-
-def get_user_model():
-    model_src = st.sidebar.radio("Model", ["Fayl yuklash", "Internet manzili"], key = int(time.time()))
-    model_file = None
-    if model_src == "file upload":
-        model_bytes = st.sidebar.file_uploader("Modelni yuklash", type=['pt'])
-        if model_bytes:
-            model_file = "models/uploaded_" + model_bytes.name
-            with open(model_file, 'wb') as out:
-                out.write(model_bytes.read())
-    else:
-        url = st.sidebar.text_input("Model URL addresi")
-        if url:
-            model_file_ = download_model(url)
-            if model_file_.split(".")[-1] == "pt":
-                model_file = model_file_
-
-    return model_file
 
 def main():
     # global variables

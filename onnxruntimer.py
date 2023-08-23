@@ -3,16 +3,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-def prediction_onnx(model_path, image):
-    opt_session = onnxruntime.SessionOptions()
-    opt_session.enable_mem_pattern = False
-    opt_session.enable_cpu_mem_arena = False
-    opt_session.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_DISABLE_ALL
-    # model_path = 'models/best.onnx'
-    EP_list = ['CUDAExecutionProvider', 'CPUExecutionProvider']
-
-    ort_session = onnxruntime.InferenceSession(model_path, providers=EP_list)
-
+def prediction_onnx(ort_session, image):
     model_inputs = ort_session.get_inputs()
     input_names = [model_inputs[i].name for i in range(len(model_inputs))]
     input_shape = model_inputs[0].shape
