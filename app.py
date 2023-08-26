@@ -4,59 +4,19 @@ import torch
 import streamlit as st
 import tempfile
 from PIL import Image
+import onnxruntime
+from onnxruntimer import prediction_onnx
+import time
+opt_session = onnxruntime.SessionOptions()
+opt_session.enable_mem_pattern = False
+opt_session.enable_cpu_mem_arena = False
+opt_session.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_DISABLE_ALL
+# model_path = 'models/best.onnx'
+EP_list = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+ort_session = onnxruntime.InferenceSession('models/yolov8n.onnx', providers=EP_list)
 
-class Deployment:
-    def __init__(self):
-        self.model = "models/yolov8n.engine"
-        self.colors = [(255,0,0),(0,0,255),(0,0,0)]
-        
-    def ImageBox(self, image):
-        
-        new_shape=(640, 640)
-        width, height, channel = image.shape
-        
-        ratio = min(new_shape[0] / width, new_shape[1] / height)
-        new_unpad = int(round(height * ratio)), int(round(width * ratio))
-        dw, dh = (new_shape[0] - new_unpad[0])/2, (new_shape[1] - new_unpad[1])/2
-
-        if (height, width) != new_unpad:
-            image = cv2.resize(image, new_unpad, interpolation=cv2.INTER_LINEAR)
-        
-        top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
-        left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
-        
-        image = cv2.copyMakeBorder(image, top, bottom, left, right, cv2.BORDER_CONSTANT, value = self.colors[-1])
-        
-        return image, ratio, (dw, dh)
-
-    def face_detection_for_image_with_engine(self, image):
-      
-        model = TRTEngine(self.model)
-        
-        img, ratio, dwdh = self.ImageBox(image)
-        tensor = blob(img, return_seg=False)
-        tensor = torch.asarray(tensor)
-
-        dwdh = np.array(dwdh * 2, dtype=np.float32)
-
-        results = model(tensor)
-
-        bboxes, scores, labels = det_postprocess(results)
-        bboxes = (bboxes-dwdh)/ratio
-        
-        for (bbox, score, label) in zip(bboxes, scores, labels):
-            bbox = bbox.round().astype(np.int32).tolist()
-            cv2.rectangle(image, (bbox[0],bbox[1]) , (bbox[2],bbox[3]) , self.colors[1], 2)
-    
-        return image
-
-def run_tensorrt(image, enggine_path):
-
-    deployment = Deployment()    
-
-    predicted_image = deployment.face_detection_for_image_with_engine(image)
-    return predicted_image
-
+def infer_image(img, model = ort_session):
+    return prediction_onnx(ort_session=model, image=img)
 
 
 def main():
@@ -87,20 +47,26 @@ def main():
         # Load the video with cv2
         cap = cv2.VideoCapture(video_path)
         outputing = st.empty()
+        fps = 0
+        prev_time = 0
+        curr_time = 0
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
 
             # Run the inference
-            output = run_tensorrt(image=frame, enggine_path='models/yolov8n.engine')
+            output = infer_image(img=frame, model=ort_session)
 
             # Convert the output to an image that can be displayed
             output_image = Image.fromarray(cv2.cvtColor(output, cv2.COLOR_BGR2RGB))
 
             # Display the image
             outputing.image(output_image)
-
+            curr_time = time.time()
+            fps = 1 / (curr_time - prev_time)
+            prev_time = curr_time
+            print(fps)
         cap.release()
     else:
         st.write("Please upload a video file or choose to use the default video.")
