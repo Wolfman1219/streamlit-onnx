@@ -18,13 +18,13 @@ opt_session.enable_cpu_mem_arena = False
 opt_session.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_DISABLE_ALL
 # model_path = 'models/best.onnx'
 EP_list = ['CUDAExecutionProvider', 'CPUExecutionProvider']
-ort_session = onnxruntime.InferenceSession('/home/hasan/Public/yolo_with_streamlit/models/yolov8n.onnx', providers=EP_list)
+ort_session = onnxruntime.InferenceSession('models/yolov8n.onnx', providers=EP_list)
 
 
 
 
 st.set_page_config(layout="wide")
-cfg_model_path = 'models/yolov8n.engine'
+cfg_model_path = 'models/yolov8n.onnx'
 model = None
 confidence = .25
 
@@ -63,7 +63,7 @@ def video_input(data_src):
     vid_file = None
     if data_src == 'Bor manbadan foydalanish':
         vid_file = "data/sample_videos/sample.mp4"
-    else:
+    elif data_src == 'File ko\'rsatish':
         vid_bytes = st.sidebar.file_uploader("Videoni yuklash", type=['mp4', 'mpv', 'avi'])
         if vid_bytes:
             vid_file = "data/uploaded_data/upload." + vid_bytes.name.split('.')[-1]

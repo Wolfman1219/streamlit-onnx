@@ -1,10 +1,6 @@
 import cv2
 import numpy as np
 import torch
-from RT.models.utils import blob
-from RT.models.torch_utils import det_postprocess
-from RT.models.cudart_api import TRTEngine
-from RT.models import EngineBuilder
 import streamlit as st
 import tempfile
 from PIL import Image
@@ -110,8 +106,4 @@ def main():
         st.write("Please upload a video file or choose to use the default video.")
 
 if __name__ == "__main__":
-    while True:
-        try:
-            main()
-        except:
-            continue
+    main()
