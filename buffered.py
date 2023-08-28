@@ -23,6 +23,7 @@ def infer_image(img, model = ort_session):
 def main():
     DEFAULT_VIDEO_PATH = "data/sample_videos/sample.mp4"
 # Create a video file uploader
+    webrtc_ctx = webrtc.StreamlitWebRTC()
     st.header("Upload a video for inference")
     uploaded_file = st.file_uploader("Choose a video...", type=["mp4", "avi", "mov"])
 
@@ -44,32 +45,36 @@ def main():
 
     # If there's a video to process, do the inference
     if video_path is not None:
+        if webrtc_ctx.state.playing:
+            frame = webrtc_ctx.video_frame.copy()
+            output = infer_image(img=frame)
         # Load the video with cv2
-        cap = cv2.VideoCapture(video_path)
-        outputing = st.empty()
-        fps = 0
-        prev_time = 0
-        curr_time = 0
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
+            cap = cv2.VideoCapture(video_path)
+            outputing = st.empty()
+            fps = 0
+            prev_time = 0
+            curr_time = 0
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret:
+                    break
 
-            # Run the inference
-            output = infer_image(img=frame, model=ort_session)
+                # Run the inference
+                output = infer_image(img=frame, model=ort_session)
 
-            # Convert the output to an image that can be displayed
-            output_image = Image.fromarray(cv2.cvtColor(output, cv2.COLOR_BGR2RGB))
+                # Convert the output to an image that can be displayed
+                output_image = Image.fromarray(cv2.cvtColor(output, cv2.COLOR_BGR2RGB))
 
-            # Display the image
-            outputing.image(output_image)
-            curr_time = time.time()
-            fps = 1 / (curr_time - prev_time)
-            prev_time = curr_time
-            # print(fps)
-        cap.release()
-    else:
-        st.write("Please upload a video file or choose to use the default video.")
+                # Display the image
+                webrtc_ctx.video_frame = np.array(output_image)
+                # outputing.image(output_image)
+                curr_time = time.time()
+                fps = 1 / (curr_time - prev_time)
+                prev_time = curr_time
+                # print(fps)
+            cap.release()
+        else:
+            st.write("Please upload a video file or choose to use the default video.")
 
 if __name__ == "__main__":
     main()

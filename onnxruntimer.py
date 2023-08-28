@@ -107,7 +107,7 @@ def prediction_onnx(ort_session, image):
     for (bbox, score, label) in zip(xywh2xyxy(boxes[indices]), scores[indices], class_ids[indices]):
         bbox = bbox.round().astype(np.int32).tolist()
         cls_id = int(label)
-        cls = CLASSES[0]
+        cls = CLASSES[cls_id]
         color = (0,255,0)
         cv2.rectangle(image_draw, tuple(bbox[:2]), tuple(bbox[2:]), color, 2)
         cv2.putText(image_draw,
